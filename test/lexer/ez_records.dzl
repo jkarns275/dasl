@@ -1,0 +1,14 @@
+type Record = { a: int, b: string, c: list, d: map }
+
+type Record2 = { a: Record, b: any, c: map }
+
+def fn(Record { a: a, b: b, c: c }) => Record:
+  Record { a: a, b: b, c: c, d: {} }
+end
+
+def fn2(x: Record) => Record2:
+  Record2 { a: x, b: {}, c: {} }
+end
+
+a = Record2 { a: Record { a: 1, b: "hey", c: [], d: {} }, b: {}, c: {} }
+print(a[:a][:b])

@@ -1,0 +1,3 @@
+def function(x, y: int, z: Module.Record) => ReturnType:
+  x + y + z.p
+end

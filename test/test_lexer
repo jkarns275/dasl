@@ -1,0 +1,11 @@
+#!/bin/sh
+
+for f in `find test/lexer -type f -name "*.dzl" -print`; do
+  x=`diff <(bin/test_lexer $f) $f.lex`
+  if [ -z "$x" ]; then
+    echo "Passed $f!"
+  else
+    echo "Failed $f:"
+    echo "$x"
+  fi
+done
