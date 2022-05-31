@@ -23,4 +23,15 @@ class Interner {
 
 } // namespace dasl
 
+namespace std {
+
+template <>
+struct hash<dasl::istring> {
+  std::size_t operator()(const dasl::istring &k) const {
+    return k.i;
+  }
+};
+
+}
+
 #endif // INTERNER_HXX

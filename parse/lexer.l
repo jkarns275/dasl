@@ -44,6 +44,8 @@ def     { return dasl::Parser::make_KW_DEF(span()); }
 
 module  { return dasl::Parser::make_KW_MODULE(span()); }
 
+if      { return dasl::Parser::make_KW_DO(span()); }
+
 if      { return dasl::Parser::make_KW_IF(span()); }
 then    { return dasl::Parser::make_KW_THEN(span()); }
 else    { return dasl::Parser::make_KW_ELSE(span()); }
@@ -95,9 +97,9 @@ list    { return dasl::Parser::make_KW_LIST(span()); }
 \<=     { return dasl::Parser::make_LTE(span()); }
 \<      { return dasl::Parser::make_LT(span()); }
 
-&       { return dasl::Parser::make_BAND(span()); }
-\|      { return dasl::Parser::make_BOR(span()); }
-\^      { return dasl::Parser::make_BXOR(span()); }
+and     { return dasl::Parser::make_BAND(span()); }
+or      { return dasl::Parser::make_BOR(span()); }
+xor     { return dasl::Parser::make_BXOR(span()); }
 
 !       { return dasl::Parser::make_NOT(span()); }
 ~       { return dasl::Parser::make_INV(span()); }

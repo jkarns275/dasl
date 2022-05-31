@@ -6,6 +6,7 @@ using std::variant;
 
 #include <utility>
 using std::pair;
+using std::make_pair;
 
 #include <vector>
 using std::vector;
@@ -14,6 +15,7 @@ using std::vector;
 using std::string;
 #include <memory>
 using std::unique_ptr;
+using std::make_unique;
 
 #include <optional>
 using std::optional;
@@ -31,53 +33,112 @@ using dasl::istring;
 
 namespace dasl::pt {
 
+class Program;
 struct Env {
   Interner interner;
+  unique_ptr<Program> pt;
+  int depth = 0;
+
+  string indent();
+  void scope_start();
+  void scope_end();
 };
 
 struct PT {
   location loc;
 
   PT();
-  virtual ~PT();
+  virtual ~PT() = default;
 
-  virtual string to_string(Env &env) = 0;
+  virtual string to_string(Env &env) const = 0;
   void set_location(location &loc);
 };
 
-struct SymbolRef : public PT {
-  const istring name;
-  const vector<istring> modules;
+struct Unit : public PT {
+  Unit();
+  virtual ~Unit() = default;
 
-  SymbolRef();
-  explicit SymbolRef(istring name);
-  explicit SymbolRef(vector<istring>& modules, istring name);
+  string to_string(Env &env) const override;
+};
+
+struct InternedValue : public PT {
+  istring val;
+
+  InternedValue();
+  explicit InternedValue(istring val);
+  explicit InternedValue(const InternedValue &);
+  virtual ~InternedValue() = default;
+
+  string to_string(Env &env) const override;
+};
+
+struct AtomValue : public InternedValue {
+  AtomValue() = default;
+  explicit AtomValue(istring val);
+  explicit AtomValue(const InternedValue &);
+  virtual ~AtomValue() = default;
+};
+
+struct StringValue : public InternedValue {
+  StringValue() = default;
+  explicit StringValue(istring str);
+  explicit StringValue(const InternedValue &);
+  virtual ~StringValue() = default;
+};
+
+struct Id : public InternedValue {
+  Id() = default;
+  explicit Id(istring str);
+  explicit Id(const InternedValue &);
+  virtual ~Id() = default;
+};
+
+enum ValueKind { STRING, UNIT, INT, FLOAT, BOOL, ATOM };
+typedef variant<StringValue, Unit, std::size_t, double, bool, AtomValue> ValueType;
+
+struct Value : public PT {
+  ValueType value;
+  ValueKind kind;
+
+  explicit Value(ValueType val);
+  virtual ~Value() = default;
+
+  string to_string(Env &env) const override;
+};
+
+struct SymbolRef : public PT {
+  Id name;
+  vector<Id> modules;
+
+  SymbolRef() = default;
+  explicit SymbolRef(Id name);
+  explicit SymbolRef(vector<Id>& modules, Id name);
   SymbolRef(SymbolRef &&) = default;
 
   SymbolRef &operator=(SymbolRef&& other);
 
-  void shift(istring n);
+  void shift(Id n);
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct Type : public PT {
   Type();
-  virtual ~Type();
+  virtual ~Type() = default;
 };
 
 struct ListType : public Type {
   ListType();
-  virtual ~ListType();
+  virtual ~ListType() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct MapType : public Type {
   MapType();
-  virtual ~MapType();
+  virtual ~MapType() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct RecordType : public Type {
@@ -86,47 +147,57 @@ struct RecordType : public Type {
   // const unordered_map<istring, unique_ptr<Type>> fields;
 
   explicit RecordType(SymbolRef &symbol);
-  virtual ~RecordType();
+  virtual ~RecordType() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct AnyType : public Type {
   AnyType();
-  virtual ~AnyType();
+  virtual ~AnyType() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct PrimType : public Type {
   const enum PrimKind { STRING, INT, FLOAT, BOOL, ATOM, UNIT } kind;
 
   explicit PrimType(PrimKind kind);
-  virtual ~PrimType();
+  virtual ~PrimType() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct Pat : public PT {
-  const optional<unique_ptr<Type>> type;
+  unique_ptr<Type> type;
 
   Pat();
-  explicit Pat(unique_ptr<Type> type);
-  virtual ~Pat();
+  explicit Pat(unique_ptr<Type> &type);
+  virtual ~Pat() = default;
 
-  void set_type(unique_ptr<Type> type);
+  void set_type(unique_ptr<Type> &type);
+ 
+ protected:
+  string type_string(Env &env) const;
 };
 
+
 struct ListPat : public Pat {
-  const vector<unique_ptr<Pat>> members;
-  const optional<unique_ptr<Pat>> tail;
+  // if pat && tail then this is a normal node in the list
+  // if pat && !tail then this is the end of the list
+  // if !pat && tail then this value in tail is supposed to represent a tail pattern
+  // if !pat && !tail then the list is over! Can be used in place of a null tail value
+  const unique_ptr<Pat> pat;
+  const unique_ptr<ListPat> tail;
+
 
   ListPat();
-  ListPat(vector<unique_ptr<Pat>> &members);
-  ListPat(vector<unique_ptr<Pat>> &members, unique_ptr<Pat> tail);
-  virtual ~ListPat();
+  explicit ListPat(unique_ptr<Pat> &pat);
+  ListPat(unique_ptr<Pat> &pat, unique_ptr<ListPat> &tail);
+  static unique_ptr<ListPat> make(vector<unique_ptr<Pat>> &pats, unique_ptr<Pat> tail = unique_ptr<Pat>());
+  virtual ~ListPat() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 typedef pair<unique_ptr<Pat>, unique_ptr<Pat>> MapPatEntry;
@@ -135,20 +206,21 @@ struct MapPat : public Pat {
 
   MapPat();
   explicit MapPat(vector<pair<unique_ptr<Pat>, unique_ptr<Pat>>> &entries);
-  virtual ~MapPat();
+  virtual ~MapPat() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
-typedef pair<istring, unique_ptr<Pat>> RecordPatField;
+typedef pair<AtomValue, unique_ptr<Pat>> RecordPatField;
 struct RecordPat : public Pat {
-  const unordered_map<istring, unique_ptr<Pat>> fields;
+  SymbolRef record_name;
+  const vector<RecordPatField> fields;
 
   explicit RecordPat(SymbolRef& record_name);
   RecordPat(SymbolRef &record_name, vector<RecordPatField> &fields);
-  virtual ~RecordPat();
+  virtual ~RecordPat() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct SymbolPat : public Pat {
@@ -156,47 +228,28 @@ struct SymbolPat : public Pat {
   SymbolRef symbol;
 
   explicit SymbolPat(SymbolRef &symbol);
-  virtual ~SymbolPat();
+  virtual ~SymbolPat() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
-
-struct Unit : public PT {
-  string to_string(Env &env) override;
-};
-struct AtomValue : public PT {
-  istring atom;
-
-  string to_string(Env &env) override;
-};
-
-struct StringValue {
-  istring str;
-
-  string to_string(Env &env) override;
-};
-
-enum ValueKind { STRING, UNIT, INT, FLOAT, BOOL, ATOM };
-typedef variant<StringValue, Unit, std::size_t, double, bool, AtomValue> Value;
 
 struct ValuePat : public Pat {
-  const ValueKind kind;
   Value value;
 
   explicit ValuePat(Value value);
-  virtual ~ValuePat();
+  virtual ~ValuePat() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct Expr : public PT {
-  // Will be nullopt if type is not explicit or trivially inferrable.
-  // More sophisticated type inference will occur in the IR.
-  const optional<unique_ptr<Type>> type;
+  unique_ptr<Type> type;
 
   Expr();
-  explicit Expr(unique_ptr<Type> type);
-  virtual ~Expr();
+  explicit Expr(unique_ptr<Type> &type);
+  virtual ~Expr() = default;
+
+  void set_type(unique_ptr<Type> &type);
 };
 
 class St;
@@ -211,11 +264,11 @@ struct IfElseExpr : public Expr {
   const Body body;
   const optional<Body> else_body;
 
-  IfElseExpr(unique_ptr<Expr> cond, Body &body);
-  IfElseExpr(unique_ptr<Expr> cond, Body &body, Body &else_body);
-  virtual ~IfElseExpr();
+  IfElseExpr(unique_ptr<Expr> &cond, Body &body);
+  IfElseExpr(unique_ptr<Expr> &cond, Body &body, Body &else_body);
+  virtual ~IfElseExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 typedef pair<unique_ptr<Pat>, unique_ptr<Expr>> Case;
@@ -226,10 +279,10 @@ struct CaseExpr : public Expr {
   const unique_ptr<Expr> value;
   const vector<Case> cases;
 
-  CaseExpr(unique_ptr<Expr> value, vector<Case> &cases);
-  virtual ~CaseExpr();
+  CaseExpr(unique_ptr<Expr> &value, vector<Case> &cases);
+  virtual ~CaseExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 typedef pair<AtomValue, unique_ptr<Expr>> RecordExprField;
@@ -241,21 +294,23 @@ struct RecordExpr : public Expr {
 
   explicit RecordExpr(SymbolRef &name);
   RecordExpr(SymbolRef &name, vector<RecordExprField> &fields);
-  virtual ~RecordExpr();
+  virtual ~RecordExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct ListExpr : public Expr {
-  const vector<unique_ptr<Expr>> elements;
-  const optional<unique_ptr<Expr>> tail;
+  const unique_ptr<Expr> value;
+  const unique_ptr<ListExpr> tail;
 
   ListExpr();
-  explicit ListExpr(vector<unique_ptr<Expr>> &elements);
-  ListExpr(vector<unique_ptr<Expr>> &elements, unique_ptr<Expr> tail);
-  virtual ~ListExpr();
+  explicit ListExpr(unique_ptr<Expr> &value);
+  ListExpr(unique_ptr<Expr> &value, unique_ptr<ListExpr> &tail);
+  static unique_ptr<ListExpr> make(vector<unique_ptr<Expr>> &values, unique_ptr<Expr> tail = unique_ptr<Expr>());
+  virtual ~ListExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
+  bool is_empty() const;
 };
 
 struct MapExpr : public Expr {
@@ -263,41 +318,40 @@ struct MapExpr : public Expr {
 
   MapExpr();
   explicit MapExpr(vector<pair<unique_ptr<Expr>, unique_ptr<Expr>>> &items);
-  virtual ~MapExpr();
+  virtual ~MapExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 // string, unit, int, float, bool, atom
 struct ValueExpr : public Expr {
   const Value value;
-  const ValueKind kind;
 
-  // Unit
   ValueExpr();
   explicit ValueExpr(Value value);
-  virtual ~ValueExpr();
+  virtual ~ValueExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct SymbolExpr : public Expr {
   const SymbolRef symbol;
 
   explicit SymbolExpr(SymbolRef &symbol);
-  virtual ~SymbolExpr();
+  virtual ~SymbolExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct CallExpr : public Expr {
   const SymbolRef name;
   const vector<unique_ptr<Expr>> args;
 
+  explicit CallExpr(SymbolRef &name);
   CallExpr(SymbolRef &name, vector<unique_ptr<Expr>> &args);
-  virtual ~CallExpr();
+  virtual ~CallExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 // add sub mul div mod AND OR XOR EQ NEQ lsh rsh, index
@@ -305,10 +359,10 @@ struct BinOpExpr : public Expr {
   const unique_ptr<Expr> lhs, rhs;
   enum BinOp { ADD, SUB, MUL, DIV, MOD, LAND, LOR, LXOR, BAND, BOR, BXOR, EQ, NEQ, LSH, RSH, INDEX, GT, GTE, LT, LTE } op;
 
-  BinOpExpr(unique_ptr<Expr> lhs, unique_ptr<Expr> rhs, BinOp op);
-  virtual ~BinOpExpr();
+  BinOpExpr(unique_ptr<Expr> &lhs, unique_ptr<Expr> &rhs, BinOp op);
+  virtual ~BinOpExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 // not, inv
@@ -316,10 +370,10 @@ struct UnOpExpr : public Expr {
   const unique_ptr<Expr> value;
   enum UnOp { NOT, INV, NEG } op;
 
-  UnOpExpr(unique_ptr<Expr> value, UnOp op);
-  virtual ~UnOpExpr();
+  UnOpExpr(unique_ptr<Expr> &value, UnOp op);
+  virtual ~UnOpExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 // List of exprs, introduces a new scope.
@@ -327,69 +381,74 @@ struct CompoundExpr : public Expr {
   const vector<unique_ptr<Expr>> exprs;
 
   explicit CompoundExpr(vector<unique_ptr<Expr>> &exprs);
-  virtual ~CompoundExpr();
+  virtual ~CompoundExpr() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 // Statements
 struct St : public PT {
-  St();
-  virtual ~St();
+  St() = default;
+  virtual ~St() = default;
 };
 
 // Defines a functino. Lambdas not supported so this returns type UNIT.
 struct DefSt : public St {
-  const istring name;
+  const Id name;
   const vector<unique_ptr<Pat>> args;
-  const optional<unique_ptr<Type>> type;
+  const unique_ptr<Type> type;
   const vector<unique_ptr<St>> body;
 
-  DefSt(istring name, vector<unique_ptr<Pat>> &args, vector<unique_ptr<St>> &body);
-  DefSt(istring name, vector<unique_ptr<Pat>> &args, unique_ptr<Type> type, vector<unique_ptr<St>> &body);
-  virtual ~DefSt();
+  DefSt(Id name, vector<unique_ptr<Pat>> &args, vector<unique_ptr<St>> &body);
+  DefSt(Id name, vector<unique_ptr<Pat>> &args, unique_ptr<Type> &type, vector<unique_ptr<St>> &body);
+  virtual ~DefSt() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 typedef pair<AtomValue, unique_ptr<Type>> RecordEntry;
+
+string record_entry_to_string(const RecordEntry &entry, Env &env);
+
 struct RecordSt : public St {
-  const istring name;
+  const Id name;
   const vector<RecordEntry> fields;
 
-  explicit RecordSt(istring name);
-  RecordSt(istring name, vector<RecordEntry> &fields);
-  virtual ~RecordSt();
+  explicit RecordSt(Id name);
+  RecordSt(Id name, vector<RecordEntry> &fields);
+  virtual ~RecordSt() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct ValSt : public St {
-  const istring name;
+  const Id name;
   const unique_ptr<Expr> expr;
 
-  ValSt(istring name, unique_ptr<Expr> expr);
-  virtual ~ValSt();
+  ValSt(Id name, unique_ptr<Expr> &expr);
+  virtual ~ValSt() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct ModuleSt : public St {
+  Id name;
   const vector<unique_ptr<St>> statements;
 
-  explicit ModuleSt(vector<unique_ptr<St>> &statements);
-  virtual ~ModuleSt();
+  ModuleSt() = default;
+  explicit ModuleSt(Id name, vector<unique_ptr<St>> &statements);
+  virtual ~ModuleSt() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct ExprSt : public St {
-  const unique_ptr<Expr> st;
+  const unique_ptr<Expr> expr;
 
-  explicit ExprSt(unique_ptr<Expr> expr);
-  virtual ~ExprSt();
+  explicit ExprSt(unique_ptr<Expr> &expr);
+  virtual ~ExprSt() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 // This should always return UNIT
@@ -397,17 +456,19 @@ struct ForSt : public St {
   const unique_ptr<Pat> pattern;
   const unique_ptr<Expr> container;
 
-  ForSt(unique_ptr<Expr> pattern, unique_ptr<Expr> container);
-  virtual ~ForSt();
+  ForSt(unique_ptr<Expr> &pattern, unique_ptr<Expr> &container);
+  virtual ~ForSt() = default;
 
-  string to_string(Env &env) override;
+  string to_string(Env &env) const override;
 };
 
 struct Program : public ModuleSt {
-  explicit Program(vector<unique_ptr<St>> &statements);
-  virtual ~Program();
+  vector<unique_ptr<St>> statements;
 
-  string to_string(Env &env) override;
+  explicit Program(vector<unique_ptr<St>> &statements);
+  virtual ~Program() = default;
+
+  string to_string(Env &env) const override;
 };
 
 } // namespace dasl::pt

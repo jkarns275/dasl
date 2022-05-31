@@ -93,7 +93,7 @@
 %token LAND       "&&"
 %token LOR        "||"
 %token LXOR       "^^"
-%token ARROW      "=>"
+%token ARROW      "arrow"
 %token EQ         "=="
 %token NEQ        "!="
 %token GTE        ">="
@@ -108,6 +108,7 @@
 %token ASSIGN     "="
 
 // Keywords
+%token KW_DO      "do";
 %token KW_END     "end";
 %token KW_DEF     "def";
 %token KW_MODULE  "module";
@@ -130,13 +131,16 @@
 %token KW_STRING  "kw_string";
 %token KW_MAP     "kw_map";
 %token KW_VAL     "val";
+%token EOF        "eof";
 
-%type< vector<unique_ptr<St>> > program;
+%type< int > program;
+%type< vector<unique_ptr<St>> > stmt_list;
 %type< SymbolRef > symbol;
 %type< unique_ptr<Type> > type;
 %type< unique_ptr<Pat> > pat;
 %type< unique_ptr<Pat> > typed_pat;
 %type< unique_ptr<Pat> > list_pat;
+%type< unique_ptr<Pat> > value_pat;
 %type< unique_ptr<Pat> > map_pat;
 %type< unique_ptr<Pat> > record_pat;
 %type< unique_ptr<Pat> > symbol_pat;
@@ -145,7 +149,7 @@
 %type< vector<MapPatEntry> > map_pat_entry_list;
 %type< RecordPatField > record_pat_field;
 %type< vector<RecordPatField> > record_pat_field_list;
-%type< istring > id;
+%type< Id > id;
 %type< unique_ptr<Expr> > primary_expr;
 %type< unique_ptr<Expr> > postfix_expr;
 %type< unique_ptr<Expr> > unary_expr;
@@ -163,6 +167,9 @@
 // %type< vector<unique_ptr<Expr>> > expr_inner;
 %type< unique_ptr<Expr> > expr;
 %type< unique_ptr<Expr> > if_expr;
+%type< unique_ptr<Expr> > list_expr;
+%type< vector<unique_ptr<Expr>> > expr_list;
+%type< vector<unique_ptr<Expr>> > call_args;
 %type< RecordExprField > record_expr_field;
 %type< vector<RecordExprField> > record_expr_field_list;
 %type< unique_ptr<Expr> > record_expr;
@@ -198,15 +205,15 @@
 %%
 
 id 
-  : ID { $$ = env.interner.get($1); }
+  : ID { $$ = Id(env.interner.get($1)); }
   ;
 
 atom 
-  : ATOM { string x {$1, 1}; $$ = AtomValue { env.interner.get(x) }; }
+  : ATOM { string x {$1, 1}; $$ = AtomValue(env.interner.get(x)); }
   ;
 
 symbol 
-  : id            { $$ = move(SymbolRef($1)); }
+  : id            { $$ = SymbolRef($1); }
   | symbol DOT id { $1.shift($3); $$ = move($1); }
   ;
 
@@ -224,19 +231,30 @@ type
   ;
 
 pat_list 
-  : pat { vector<unique_ptr<Pat>> v; v.push_back(move($1)); $$ = move(v); }
-  | pat_list COMMA pat { $1.push_back(move($3)); $$ = move($1); }
+  : typed_pat { vector<unique_ptr<Pat>> v; v.push_back(move($1)); $$ = move(v); }
+  | pat_list COMMA typed_pat { $1.push_back(move($3)); $$ = move($1); }
   ;
 
 list_pat 
   : "[" "]" { $$ = make_unique<ListPat>(); } 
-  | "[" pat_list "]" { $$ = make_unique<ListPat>($2); }
-  | "[" pat_list "::" pat "]" { $$ = make_unique<ListPat>($2, move($4)); }
+  | "[" pat_list "]" { $$ = ListPat::make($2); }
+  | "[" pat_list "::" typed_pat "]" { $$ = ListPat::make($2, move($4)); }
+  ;
+
+expr_list
+  : expr { vector<unique_ptr<Expr>> e; e.push_back(move($1)); $$ = move(e); }
+  | expr_list COMMA expr { $1.push_back(move($3)); $$ = move($1); }
+  ;
+
+list_expr
+  : "[" "]" { $$ = make_unique<ListExpr>(); }
+  | "[" expr_list "]" { $$ = ListExpr::make($2); }
+  | "[" expr_list "::" expr "]" { $$ = ListExpr::make($2, move($4)); }
   ;
 
 map_pat_entry 
-  : pat COLON pat { $$ = pair(move($1), move($3)); }
-  | pat ARROW pat { $$ = pair(move($1), move($3)); }
+  : pat COLON pat { $$ = make_pair(move($1), move($3)); }
+  | pat ARROW pat { $$ = make_pair(move($1), move($3)); }
   ;
 
 map_pat_entry_list 
@@ -250,11 +268,11 @@ map_pat
   ;
 
 record_pat_field 
-  : id COLON pat { $$ = pair($1, move($3)); }
+  : id COLON pat { $$ = make_pair(AtomValue($1.val), move($3)); }
   ;
 
 record_pat_field_list
-  : record_pat_field { vector<pair<istring, unique_ptr<Pat>>> x; x.push_back(move($1)); $$ = move(x); }
+  : record_pat_field { vector<pair<AtomValue, unique_ptr<Pat>>> x; x.push_back(move($1)); $$ = move(x); }
   | record_pat_field_list COMMA record_pat_field { $1.push_back(move($3)); $$ = move($1); }
   ;
 
@@ -267,21 +285,32 @@ symbol_pat
   : symbol { $$ = make_unique<SymbolPat>($1); }
   ;
 
-pat 
+value_pat
+  : INT { $$ = make_unique<ValuePat>(Value($1)); }
+  | "(" ")" { $$ = make_unique<ValuePat>(Value(Unit())); }
+  | STRING { $$ = make_unique<ValuePat>(Value(StringValue(env.interner.get($1)))); }
+  | FLOAT { $$ = make_unique<ValuePat>(Value($1)); }
+  | "true" { $$ = make_unique<ValuePat>(Value(true)); }
+  | "false" { $$ = make_unique<ValuePat>(Value(false)); }
+  | atom { $$ = make_unique<ValuePat>(Value($1)); }
+  ;
+
+pat
   : list_pat { $$ = move($1); }
   | map_pat { $$ = move($1); }
   | record_pat { $$ = move($1); }
   | symbol_pat { $$ = move($1); }
+  | value_pat { $$ = move($1); }
   ;
 
 typed_pat 
-  : pat COLON type { $1.set_type(move($3)); $$ = move($1); }
+  : pat COLON type { $1->set_type($3); $$ = move($1); }
   | pat { $$ = move($1); }
   ;
 
 def_arg_list
-  : def_arg_list "," pat { $1.push_back(move($3)); $$ = move($1); }
-  | pat { vector<unique_ptr<Pat>> v; v.push_back(move($1)); $$ = move(v); }
+  : def_arg_list "," typed_pat { $1.push_back(move($3)); $$ = move($1); }
+  | typed_pat { vector<unique_ptr<Pat>> v; v.push_back(move($1)); $$ = move(v); }
   ;
 
 def_args
@@ -290,19 +319,19 @@ def_args
   ;
 
 body
-  : body stmt { $1.push_back(move($2)); $$ = move($1); }
-  | body ";" stmt { $1.push_back(move($3)); $$ = move($1); }
+  // : body stmt { $1.push_back(move($2)); $$ = move($1); }
+  : body ";" stmt { $1.push_back(move($3)); $$ = move($1); }
   | stmt { vector<unique_ptr<St>> x; x.push_back(move($1)); $$ = move(x); }
   ;
 
 def_stmt
-  : "def" id def_args COLON body END { $$ = make_unique<DefSt>($2, $3, $5); }
-  | "def" id def_args "arrow" type COLON body END { $$ = make_unique<DefSt>($2, $3, move($5), $7); }
+  : "def" id def_args "do" body "end" { $$ = make_unique<DefSt>($2, $3, $5); }
+  | "def" id def_args "arrow" type "do" body "end" { $$ = make_unique<DefSt>($2, $3, $5, $7); }
   ;
 
 record_entry
-  : atom ARROW type { $$ = pair($1, move($3)); }
-  | id COLON type { $$ = pair(AtomValue { $1 }, move($3)); }
+  : atom ARROW type { $$ = make_pair($1, move($3)); }
+  | id COLON type { $$ = make_pair(AtomValue($1.val), move($3)); }
   ;
 
 record_entry_list
@@ -316,7 +345,7 @@ record_stmt
   ;
 
 val_stmt
-  : "val" id "=" expr { $$ = make_unique<ValSt>($2, move($4)); }
+  : "val" id "=" expr { $$ = make_unique<ValSt>($2, $4); }
   ;
 
 module_body
@@ -326,11 +355,11 @@ module_body
   ;
 
 module_stmt
-  : "module" id module_body "end"
+  : "module" id module_body "end" { $$ = make_unique<ModuleSt>($2, $3); }
   ;
 
 expr_stmt
-  : expr { $$ = make_unique<ExprSt>(move($1)); }
+  : expr { $$ = make_unique<ExprSt>($1); }
   ;
 
 stmt
@@ -338,12 +367,12 @@ stmt
   | val_stmt { $$ = move($1); }
   | record_stmt { $$ = move($1); }
   | def_stmt { $$ = move($1); }
-  | expr_stmt { $$ = move($1); }
+  // | expr_stmt { $$ = move($1); }
   ;
 
 record_expr_field
-  : id ":" expr { $$ = pair(AtomValue { $1 }, move($3)); }
-  | atom ARROW expr { $$ = pair($1, move($3)); }
+  : id ":" expr { $$ = make_pair(AtomValue($1), move($3)); }
+  | atom ARROW expr { $$ = make_pair($1, move($3)); }
   ;
 
 record_expr_field_list
@@ -356,55 +385,39 @@ record_expr
   | symbol CBOPEN CBCLOSE { $$ = make_unique<RecordExpr>($1); }
   ;
 
-if_expr 
-  : "if" expr "then" body "end" { $$ = make_unique<IfElseExpr>(move($2), $4); }
-  | "if" expr "then" body "else" body "end" { $$ = make_unique<IfElseExpr>(move($2), $4, $6); }
-  ;
-
-case_ 
-  : pat ARROW expr { $$ = pair(move($1), move($3)); }
-  ;
-
-cases
-  : cases "|" case_ { $1.push_back(move($3)); $$ = move($1); }
-  | case_ { vector<Case> x; x.push_back(move($1)); $$ = move(x); }
-  | "|" case_ { vector<Case> x; x.push_back(move($2)); $$ = move(x); }
-  ;
-
-case_expr
-  : "case" expr "of" cases { $$ = make_unique<CaseExpr>(move($2), $4); }
-  ;
-
-compound_expr
-  : compound_expr ";" expr { $1.push_back(move($3)); $$ = move($1); }
-  | expr { vector<unique_ptr<Expr>> e; e.push_back(move($1)); $$ = move(e); }
-  ;
+// compound_expr
+//   : compound_expr ";" expr { $1.push_back(move($3)); $$ = move($1); }
+//   | expr { vector<unique_ptr<Expr>> e; e.push_back(move($1)); $$ = move(e); }
+//   ;
 
 primary_expr 
-  : STRING { $$ = make_unique<ValueExpr>(StringValue { env.interner.get($1) }); }
-  | ATOM { $$ = make_unique<ValueExpr>(AtomValue { env.interner.get($1) }); }
+  : STRING { $$ = make_unique<ValueExpr>(Value(StringValue(env.interner.get($1)))); }
+  | atom { $$ = make_unique<ValueExpr>(Value($1)); }
   | record_expr { $$ = move($1); }
   | symbol { $$ = make_unique<SymbolExpr>($1); }
-  | INT { $$ = make_unique<ValueExpr>($1); }
-  | FLOAT { $$ = make_unique<ValueExpr>($1); }
-  | POPEN PCLOSE { $$ = make_unique<ValueExpr>(Unit {}); }
-  | KW_FALSE { $$ = make_unique<ValueExpr>(false); }
-  | KW_TRUE { $$ = make_unique<ValueExpr>(true); }
-  | if_expr { $$ = move($1); }
-  | case_expr { $$ = move($1); }
-  | POPEN compound_expr PCLOSE { $$ = make_unique<CompoundExpr>($2); }
+  | INT { $$ = make_unique<ValueExpr>(Value($1)); }
+  | FLOAT { $$ = make_unique<ValueExpr>(Value($1)); }
+  | POPEN PCLOSE { $$ = make_unique<ValueExpr>(Value(Unit())); }
+  | KW_FALSE { $$ = make_unique<ValueExpr>(Value(false)); }
+  | KW_TRUE { $$ = make_unique<ValueExpr>(Value(true)); }
+  | POPEN expr PCLOSE { $$ = move($2); }
+  | list_expr { $$ = move($1); }
   ;
 
 postfix_expr
-  : primary_expr { $$ = $1; }
+  : primary_expr { $$ = move($1); }
   | postfix_expr "[" expr "]" { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::INDEX); }
-  | symbol "(" ")" { vector<unique_ptr<Expr>> args; $$ = make_unique<CallExpr>($1, args); }
-  | symbol "(" argument_expr_list ")" { $$ = make_unique<CallExpr>($1, $3); }
+  | symbol call_args { $$ = make_unique<CallExpr>($1, $2); }
+  ;
+
+call_args
+  : "(" ")" { $$ = vector<unique_ptr<Expr>>(); }
+  | "(" argument_expr_list ")" { $$ = move($2); }
   ;
 
 argument_expr_list
-  : expr { vector<unique_ptr<Expr>> args; args.push_back(expr); $$ = args; }
-  | argument_expr_list COMMA expr { $1.push_back($3); $$ = $1; }
+  : expr { vector<unique_ptr<Expr>> args; args.push_back(move($1)); $$ = move(args); }
+  | argument_expr_list COMMA expr { $1.push_back(move($3)); $$ = move($1); }
   ;
 
 un_op
@@ -414,8 +427,8 @@ un_op
   ;
 
 unary_expr
-  : un_op mult_expr { $$ = make_unique<UnOpExpr>(move($2), $1); }
-  | mult_expr { $$ = $1; }
+  : un_op postfix_expr { $$ = make_unique<UnOpExpr>($2, $1); }
+  | postfix_expr { $$ = move($1); }
   ;
 
 mult_op
@@ -425,8 +438,8 @@ mult_op
   ;
 
 mult_expr
-  : mult_expr mult_op add_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), $2); }
-  | add_expr { $$ = move($1); }
+  : mult_expr mult_op unary_expr { $$ = make_unique<BinOpExpr>($1, $3, $2); }
+  | unary_expr { $$ = move($1); }
   ;
 
 add_op
@@ -435,8 +448,8 @@ add_op
   ;
 
 add_expr
-  : add_expr add_op shift_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), $2); }
-  | shift_expr { $$ = move($1); }
+  : add_expr add_op mult_expr { $$ = make_unique<BinOpExpr>($1, $3, $2); }
+  | mult_expr { $$ = move($1); }
   ;
 
 shift_op
@@ -445,8 +458,8 @@ shift_op
   ;
 
 shift_expr
-  : shift_expr shift_op comp_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), $2); }
-  | comp_expr { $$ = move($1); }
+  : shift_expr shift_op add_expr { $$ = make_unique<BinOpExpr>($1, $3, $2); }
+  | add_expr { $$ = move($1); }
   ;
 
 comp_op
@@ -457,8 +470,8 @@ comp_op
   ;
 
 comp_expr
-  : comp_expr comp_op eq_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), $2); }
-  | eq_expr { $$ = move($1); }
+  : comp_expr comp_op shift_expr { $$ = make_unique<BinOpExpr>($1, $3, $2); }
+  | shift_expr { $$ = move($1); }
   ;
 
 eq_op
@@ -467,38 +480,38 @@ eq_op
   ;
 
 eq_expr
-  : eq_expr eq_op band_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), $2); }
-  | band_expr { $$ = move($1); }
+  : eq_expr eq_op comp_expr { $$ = make_unique<BinOpExpr>($1, $3, $2); }
+  | comp_expr { $$ = move($1); }
   ;
 
 band_expr
-  : band_expr BAND bxor_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), BinOpExpr::BAND); }
-  | bxor_expr { $$ = move($1); }
+  : band_expr BAND eq_expr { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::BAND); }
+  | eq_expr { $$ = move($1); }
   ;
 
 bxor_expr
-  : bxor_expr BXOR bor_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), BinOpExpr::BXOR); }
-  | bor_expr { $$ = move($1); }
+  : bxor_expr BXOR band_expr { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::BXOR); }
+  | band_expr { $$ = move($1); }
   ;
 
 bor_expr
-  : bor_expr BOR land_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), BinOpExpr::BOR; }
-  | land_expr { $$ = move($1); }
+  : bor_expr BOR bxor_expr { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::BOR); }
+  | bxor_expr { $$ = move($1); }
   ;
 
 land_expr
-  : land_expr LAND lxor_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), BinOpExpr::LAND); }
-  | lxor_expr { $$ = move($1); }
+  : land_expr LAND bor_expr { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::LAND); }
+  | bor_expr { $$ = move($1); }
   ;
 
 lxor_expr
-  : lxor_expr LXOR lor_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), BinOpExpr::LXOR); }
-  | lor_expr { $$ = move($1); }
+  : lxor_expr LXOR land_expr { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::LXOR); }
+  | land_expr { $$ = move($1); }
   ;
 
 lor_expr
-  : lor_expr LOR primary_expr { $$ = make_unique<BinOpExpr>(move($1), move($3), BinOpExpr::LOR); }
-  | primary_expr { $$ = move($1); }
+  : lor_expr LOR lxor_expr { $$ = make_unique<BinOpExpr>($1, $3, BinOpExpr::LOR); }
+  | lxor_expr { $$ = move($1); }
   ;
 
 // expr_inner
@@ -507,13 +520,37 @@ lor_expr
 //   | lor_expr { vector<unique_ptr<Expr>> e; e.push_back(move($1)); $$ = move(e); }
 //   ;
 
+if_expr 
+  : "if" expr "then" body "end" { $$ = make_unique<IfElseExpr>($2, $4); }
+  | "if" expr "then" body "else" body "end" { $$ = make_unique<IfElseExpr>($2, $4, $6); }
+  ;
+
+case_ 
+  : pat ARROW lor_expr { $$ = make_pair(move($1), move($3)); }
+  ;
+
+cases
+  : cases "|" case_ { $1.push_back(move($3)); $$ = move($1); }
+  | case_ { vector<Case> x; x.push_back(move($1)); $$ = move(x); }
+  | "|" case_ { vector<Case> x; x.push_back(move($2)); $$ = move(x); }
+  ;
+
+case_expr
+  : "case" expr "of" cases { $$ = make_unique<CaseExpr>($2, $4); }
+  ;
 expr
   : lor_expr { $$ = move($1); }
+  | if_expr { $$ = move($1); }
+  | case_expr { $$ = move($1); }
+  ;
+
+stmt_list
+  : stmt_list stmt { $1.push_back(move($2)); $$ = move($1); }
+  | stmt { vector<unique_ptr<St>> s; s.push_back(move($1)); $$ = move(s); }
   ;
 
 program
-  : program stmt { $1.push_back(move($2)); $$ = move($1); }
-  | stmt { vector<unique_ptr<St>> s; s.push_back(move($1)); $$ = move(s); }
+  : stmt_list END { env.pt = make_unique<Program>($1); $$ = 0; }
   ;
 
 %%
